@@ -3,6 +3,7 @@ Local LLM Translation Engine using OpenAI-compatible Local API.
 """
 
 import os
+import openai
 from openai import OpenAI
 from utils.security import validate_local_endpoint
 
@@ -31,7 +32,20 @@ class LocalTranslator:
             api_key=self.api_key,
             timeout=self.timeout,
             max_retries=1,
+            # OSのプロキシ設定(環境変数/Windowsレジストリ)を無視し、ループバックへ直接接続する。
+            # 既定のままだと 127.0.0.1 宛ての翻訳本文がシステムプロキシへ送られてしまう。
+            http_client=openai.DefaultHttpxClient(trust_env=False, follow_redirects=False),
         )
+        self._model: str | None = None
+
+    def _resolve_model(self) -> str:
+        """サーバーが提供するモデル名を /v1/models から取得する（埋め込みモデルは除外）。"""
+        if self._model is None:
+            ids = [m.id for m in self.client.models.list().data if "embed" not in m.id.lower()]
+            if not ids:
+                raise RuntimeError("no chat model")
+            self._model = ids[0]
+        return self._model
 
     def translate(self, text: str) -> str:
         if not text or not text.strip():
@@ -39,7 +53,7 @@ class LocalTranslator:
 
         try:
             response = self.client.chat.completions.create(
-                model="local-model",
+                model=self._resolve_model(),
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": f"<TEXT_TO_TRANSLATE>\n{text}\n</TEXT_TO_TRANSLATE>"},
@@ -52,11 +66,15 @@ class LocalTranslator:
                 return result.strip() if result else "（翻訳結果が空でした）"
             return "（翻訳結果を取得できませんでした）"
 
+        except openai.APITimeoutError:
+            return "【エラー】ローカルLLMの応答がタイムアウトしました。モデルの負荷状況を確認してください。"
+        except openai.APIConnectionError:
+            return "【エラー】ローカルLLMサーバー（LM Studio等）に接続できません。\n127.0.0.1:1234 でサーバーが起動しているか確認してください。"
+        except openai.APIStatusError as e:
+            if e.status_code in (400, 404):
+                self._model = None  # モデルが入れ替えられた可能性があるため次回取得し直す
+            return f"【エラー】ローカルLLMリクエスト失敗 (HTTP {e.status_code}): モデルがロードされているか確認してください。"
+        except RuntimeError:
+            return "【エラー】ローカルLLMに利用可能なチャットモデルがありません。LM Studioでモデルをロードしてください。"
         except Exception as e:
-            err_msg = str(e)
-            if "Connection refused" in err_msg or "Failed to establish a new connection" in err_msg:
-                return "【エラー】ローカルLLMサーバー（LM Studio等）に接続できません。\n127.0.0.1:1234 でサーバーが起動しているか確認してください。"
-            elif "timed out" in err_msg.lower():
-                return "【エラー】ローカルLLMの応答がタイムアウトしました。モデルの負荷状況を確認してください。"
-            else:
-                return "【エラー】ローカルLLMリクエスト失敗: サーバー状態を確認してください。"
+            return f"【エラー】ローカルLLMリクエスト失敗 ({type(e).__name__}): サーバー状態を確認してください。"
