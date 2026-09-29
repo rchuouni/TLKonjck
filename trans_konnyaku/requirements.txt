@@ -1,0 +1,5 @@
+PySide6>=6.7.0
+mss>=9.0.1
+Pillow>=10.3.0
+openai>=1.30.0
+winsdk>=1.0.0b10
